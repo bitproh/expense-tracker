@@ -50,6 +50,20 @@ def init_db():
         )
     """)
 
+    # Rollover Adjustments / Overrides per month-year & category
+    # (Stores custom manual adjustment to rollover value)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS rollover_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category_id INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            month INTEGER NOT NULL,
+            adjustment REAL DEFAULT 0.0,
+            UNIQUE(category_id, year, month),
+            FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+        )
+    """)
+
     # Seed default category if empty
     cur.execute("SELECT COUNT(*) as cnt FROM categories")
     if cur.fetchone()["cnt"] == 0:
@@ -131,6 +145,7 @@ def delete_category(cat_id):
     cur.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
     cur.execute("DELETE FROM expenses WHERE category_id = ?", (cat_id,))
     cur.execute("DELETE FROM quick_templates WHERE category_id = ?", (cat_id,))
+    cur.execute("DELETE FROM rollover_adjustments WHERE category_id = ?", (cat_id,))
     conn.commit()
     conn.close()
 
@@ -246,6 +261,7 @@ def get_category_monthly_stats(category_id, year, month, rolled_over_amount=0.0)
         "is_frequency_exceeded": count > cat["frequency_per_month"],
     }
 
+# ----------------- ROLLOVER VALUE & ADJUSTMENT -----------------
 def get_rollover_from_previous_month(year, month):
     if month == 1:
         prev_year = year - 1
@@ -256,13 +272,15 @@ def get_rollover_from_previous_month(year, month):
 
     cats = get_categories()
     if not cats:
-        return 0.0, {}
+        return 0.0, {}, {}, {}
 
     conn = get_connection()
     cur = conn.cursor()
     prev_prefix = f"{prev_year:04d}-{prev_month:02d}-%"
     
-    cat_savings = {}
+    cat_base_savings = {}
+    cat_adjustments = {}
+    cat_final_savings = {}
     total_savings = 0.0
 
     for cat in cats:
@@ -272,16 +290,50 @@ def get_rollover_from_previous_month(year, month):
             WHERE category_id = ? AND date LIKE ?
         """, (cat["id"], prev_prefix))
         spent = cur.fetchone()["spent"]
-        saving = max(0.0, cat["monthly_budget"] - spent)
-        cat_savings[cat["id"]] = saving
-        total_savings += saving
+        base_saving = max(0.0, cat["monthly_budget"] - spent)
+        cat_base_savings[cat["id"]] = base_saving
+
+        # Fetch manual adjustment
+        cur.execute("""
+            SELECT adjustment FROM rollover_adjustments
+            WHERE category_id = ? AND year = ? AND month = ?
+        """, (cat["id"], year, month))
+        adj_row = cur.fetchone()
+        adj = adj_row["adjustment"] if adj_row else 0.0
+        cat_adjustments[cat["id"]] = adj
+
+        # Final saving can be incremented, decreased or reset to 0
+        final_val = max(0.0, base_saving + adj)
+        cat_final_savings[cat["id"]] = final_val
+        total_savings += final_val
 
     conn.close()
-    return total_savings, cat_savings
+    return total_savings, cat_final_savings, cat_base_savings, cat_adjustments
+
+def set_rollover_adjustment(category_id, year, month, adjustment_value):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO rollover_adjustments (category_id, year, month, adjustment)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(category_id, year, month)
+        DO UPDATE SET adjustment = excluded.adjustment
+    """, (category_id, year, month, float(adjustment_value)))
+    conn.commit()
+    conn.close()
+
+def reset_category_rollover(category_id, year, month, base_saving):
+    """Resets rollover for this category to exactly 0 by setting adjustment = -base_saving"""
+    set_rollover_adjustment(category_id, year, month, -float(base_saving))
+
+def reset_all_rollovers_for_month(year, month):
+    """Resets all categories' rollover to 0 for this month"""
+    _, _, cat_base_savings, _ = get_rollover_from_previous_month(year, month)
+    for cat_id, base_saving in cat_base_savings.items():
+        reset_category_rollover(cat_id, year, month, base_saving)
 
 # ----------------- RESET PROVISIONS -----------------
 def reset_expenses_weekly():
-    """Deletes expenses from Monday of current week through Sunday."""
     today = datetime.date.today()
     start_of_week = today - datetime.timedelta(days=today.weekday())
     end_of_week = start_of_week + datetime.timedelta(days=6)
@@ -297,7 +349,6 @@ def reset_expenses_weekly():
     return deleted_cnt, str(start_of_week), str(end_of_week)
 
 def reset_expenses_monthly(year, month):
-    """Deletes expenses for specified month and year."""
     prefix = f"{year:04d}-{month:02d}-%"
     conn = get_connection()
     cur = conn.cursor()
@@ -308,7 +359,6 @@ def reset_expenses_monthly(year, month):
     return deleted_cnt
 
 def reset_expenses_all_time():
-    """Deletes all expense entries, keeping categories intact."""
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM expenses")
