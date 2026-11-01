@@ -11,7 +11,6 @@ def get_connection():
     return conn
 
 def hash_password(password: str) -> str:
-    """Standard SHA-256 password hash (no external package dependency)."""
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 def init_db():
@@ -29,11 +28,39 @@ def init_db():
         )
     """)
 
-    # 2. Categories Table with user_id
+    # 2. Re-create categories if it still has old global UNIQUE(name) instead of UNIQUE(user_id, name)
+    cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='categories'")
+    cat_schema = cur.fetchone()
+    if cat_schema and "name TEXT UNIQUE" in cat_schema[0]:
+        # Migrate categories table to multi-user table with UNIQUE(user_id, name)
+        cur.execute("""
+            CREATE TABLE categories_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER DEFAULT 1,
+                name TEXT NOT NULL,
+                limit_per_time REAL NOT NULL,
+                frequency_per_month INTEGER NOT NULL,
+                monthly_budget REAL NOT NULL,
+                icon TEXT DEFAULT '🏷️',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE(user_id, name)
+            )
+        """)
+        # Copy existing data
+        cur.execute("""
+            INSERT INTO categories_new (id, user_id, name, limit_per_time, frequency_per_month, monthly_budget, icon, created_at)
+            SELECT id, COALESCE(user_id, 1), name, limit_per_time, frequency_per_month, monthly_budget, icon, created_at
+            FROM categories
+        """)
+        cur.execute("DROP TABLE categories")
+        cur.execute("ALTER TABLE categories_new RENAME TO categories")
+
+    # Ensure categories table exists
     cur.execute("""
         CREATE TABLE IF NOT EXISTS categories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            user_id INTEGER DEFAULT 1,
             name TEXT NOT NULL,
             limit_per_time REAL NOT NULL,
             frequency_per_month INTEGER NOT NULL,
@@ -49,7 +76,7 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS expenses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            user_id INTEGER DEFAULT 1,
             category_id INTEGER NOT NULL,
             amount REAL NOT NULL,
             date TEXT NOT NULL,
@@ -64,7 +91,7 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS quick_templates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            user_id INTEGER DEFAULT 1,
             category_id INTEGER NOT NULL,
             label TEXT NOT NULL,
             amount REAL NOT NULL,
@@ -78,7 +105,7 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS rollover_adjustments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            user_id INTEGER DEFAULT 1,
             category_id INTEGER NOT NULL,
             year INTEGER NOT NULL,
             month INTEGER NOT NULL,
@@ -89,7 +116,7 @@ def init_db():
         )
     """)
 
-    # Auto-migration: check if user_id column exists in legacy tables
+    # Auto-migration: check if user_id column exists
     for table in ["categories", "expenses", "quick_templates", "rollover_adjustments"]:
         cur.execute(f"PRAGMA table_info({table})")
         cols = [c["name"] for c in cur.fetchall()]
@@ -106,13 +133,11 @@ def init_db():
         """, ("demo", default_pwd_hash, "Demo User"))
         default_uid = cur.lastrowid
         
-        # Link existing unassigned records to demo user
         cur.execute("UPDATE categories SET user_id = ? WHERE user_id IS NULL OR user_id = 0", (default_uid,))
         cur.execute("UPDATE expenses SET user_id = ? WHERE user_id IS NULL OR user_id = 0", (default_uid,))
         cur.execute("UPDATE quick_templates SET user_id = ? WHERE user_id IS NULL OR user_id = 0", (default_uid,))
         cur.execute("UPDATE rollover_adjustments SET user_id = ? WHERE user_id IS NULL OR user_id = 0", (default_uid,))
 
-        # Add initial sample categories for demo user if none exist
         cur.execute("SELECT COUNT(*) as cnt FROM categories WHERE user_id = ?", (default_uid,))
         if cur.fetchone()["cnt"] == 0:
             seed_user_defaults(cur, default_uid)
@@ -159,6 +184,13 @@ def register_user(username, password, name=""):
 
     conn = get_connection()
     cur = conn.cursor()
+    
+    # 1. Check if username specifically is taken
+    cur.execute("SELECT id FROM users WHERE username = ?", (username,))
+    if cur.fetchone():
+        conn.close()
+        return False, f"Username '{username}' is already registered. Please click 'Sign In' or choose a different username."
+
     try:
         cur.execute("""
             INSERT INTO users (username, password_hash, name)
@@ -167,9 +199,10 @@ def register_user(username, password, name=""):
         new_uid = cur.lastrowid
         seed_user_defaults(cur, new_uid)
         conn.commit()
-        return True, "Account created successfully! You can now log in."
-    except sqlite3.IntegrityError:
-        return False, f"Username '{username}' is already taken. Please choose another."
+        return True, "Account created successfully! You can now sign in."
+    except Exception as e:
+        conn.rollback()
+        return False, f"Registration error: {str(e)}"
     finally:
         conn.close()
 
@@ -390,7 +423,6 @@ def get_rollover_from_previous_month(user_id, year, month):
             adj = adj_row["adjustment"] if adj_row else 0.0
             cat_adjustments[cat["id"]] = adj
 
-            # Final saving
             final_val = max(0.0, base_saving + adj)
             cat_final_savings[cat["id"]] = final_val
             total_savings += final_val
