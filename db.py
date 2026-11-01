@@ -51,7 +51,6 @@ def init_db():
     """)
 
     # Rollover Adjustments / Overrides per month-year & category
-    # (Stores custom manual adjustment to rollover value)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS rollover_adjustments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -283,31 +282,34 @@ def get_rollover_from_previous_month(year, month):
     cat_final_savings = {}
     total_savings = 0.0
 
-    for cat in cats:
-        cur.execute("""
-            SELECT COALESCE(SUM(amount), 0) as spent
-            FROM expenses
-            WHERE category_id = ? AND date LIKE ?
-        """, (cat["id"], prev_prefix))
-        spent = cur.fetchone()["spent"]
-        base_saving = max(0.0, cat["monthly_budget"] - spent)
-        cat_base_savings[cat["id"]] = base_saving
+    try:
+        for cat in cats:
+            cur.execute("""
+                SELECT COALESCE(SUM(amount), 0) as spent
+                FROM expenses
+                WHERE category_id = ? AND date LIKE ?
+            """, (cat["id"], prev_prefix))
+            row = cur.fetchone()
+            spent = row["spent"] if row else 0.0
+            base_saving = max(0.0, cat["monthly_budget"] - spent)
+            cat_base_savings[cat["id"]] = base_saving
 
-        # Fetch manual adjustment
-        cur.execute("""
-            SELECT adjustment FROM rollover_adjustments
-            WHERE category_id = ? AND year = ? AND month = ?
-        """, (cat["id"], year, month))
-        adj_row = cur.fetchone()
-        adj = adj_row["adjustment"] if adj_row else 0.0
-        cat_adjustments[cat["id"]] = adj
+            # Fetch manual adjustment
+            cur.execute("""
+                SELECT adjustment FROM rollover_adjustments
+                WHERE category_id = ? AND year = ? AND month = ?
+            """, (cat["id"], year, month))
+            adj_row = cur.fetchone()
+            adj = adj_row["adjustment"] if adj_row else 0.0
+            cat_adjustments[cat["id"]] = adj
 
-        # Final saving can be incremented, decreased or reset to 0
-        final_val = max(0.0, base_saving + adj)
-        cat_final_savings[cat["id"]] = final_val
-        total_savings += final_val
+            # Final saving can be incremented, decreased or reset to 0
+            final_val = max(0.0, base_saving + adj)
+            cat_final_savings[cat["id"]] = final_val
+            total_savings += final_val
+    finally:
+        conn.close()
 
-    conn.close()
     return total_savings, cat_final_savings, cat_base_savings, cat_adjustments
 
 def set_rollover_adjustment(category_id, year, month, adjustment_value):
@@ -323,12 +325,11 @@ def set_rollover_adjustment(category_id, year, month, adjustment_value):
     conn.close()
 
 def reset_category_rollover(category_id, year, month, base_saving):
-    """Resets rollover for this category to exactly 0 by setting adjustment = -base_saving"""
     set_rollover_adjustment(category_id, year, month, -float(base_saving))
 
 def reset_all_rollovers_for_month(year, month):
-    """Resets all categories' rollover to 0 for this month"""
-    _, _, cat_base_savings, _ = get_rollover_from_previous_month(year, month)
+    result = get_rollover_from_previous_month(year, month)
+    cat_base_savings = result[2]
     for cat_id, base_saving in cat_base_savings.items():
         reset_category_rollover(cat_id, year, month, base_saving)
 
