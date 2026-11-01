@@ -12,7 +12,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Polished Modern Dark/Light Adaptive CSS Styling
+# Custom Styling
 st.markdown("""
 <style>
     .block-container {
@@ -27,6 +27,9 @@ st.markdown("""
         border-radius: 16px;
         margin-bottom: 24px;
         box-shadow: 0 4px 14px rgba(0,0,0,0.1);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
     }
     .app-header h1 {
         margin: 0;
@@ -39,6 +42,14 @@ st.markdown("""
         margin: 4px 0 0 0;
         color: #94a3b8;
         font-size: 0.95rem;
+    }
+    .user-tag {
+        background: rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        padding: 6px 14px;
+        border-radius: 20px;
+        font-size: 0.88rem;
+        color: #e2e8f0;
     }
     .stat-card {
         background: #ffffff;
@@ -103,13 +114,89 @@ st.markdown("""
         justify-content: space-between;
         align-items: center;
     }
+    .auth-container {
+        max-width: 440px;
+        margin: 3rem auto;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        padding: 30px;
+        border-radius: 16px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.06);
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize database
+# Initialize database schema
 db.init_db()
 
+# Check Authentication Session State
+if "logged_in_user" not in st.session_state:
+    st.session_state["logged_in_user"] = None
+
+# ----------------- LOGIN / REGISTER SCREEN -----------------
+if st.session_state["logged_in_user"] is None:
+    st.markdown("""
+    <div style="text-align: center; margin-top: 2rem; margin-bottom: 1rem;">
+        <h1 style="font-size: 2.2rem; color: #0f172a; margin-bottom: 4px;">💳 SpendWise</h1>
+        <p style="color: #64748b;">Smart Budgeting & Dynamic Limit Balancing</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    auth_tab_login, auth_tab_register = st.tabs(["🔑 Sign In", "✨ Create New Account"])
+
+    with auth_tab_login:
+        st.write("Welcome back! Sign in to access your personal expenses.")
+        with st.form("login_form"):
+            login_user = st.text_input("Username", placeholder="e.g. demo, azif")
+            login_pass = st.text_input("Password", type="password")
+            btn_login = st.form_submit_button("Sign In", width="stretch", type="primary")
+
+            if btn_login:
+                user = db.authenticate_user(login_user, login_pass)
+                if user:
+                    st.session_state["logged_in_user"] = user
+                    st.toast(f"Welcome back, {user['name']}!", icon="👋")
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password. Please try again.")
+
+        st.caption("Default demo account: Username `demo`, Password `demo123`")
+
+    with auth_tab_register:
+        st.write("New to SpendWise? Create your private personal expense account in seconds.")
+        with st.form("register_form"):
+            reg_name = st.text_input("Your Full Name (Optional)", placeholder="e.g. Alex Doe")
+            reg_user = st.text_input("Choose Username", placeholder="e.g. alex")
+            reg_pass = st.text_input("Choose Password (min 4 characters)", type="password")
+            btn_register = st.form_submit_button("Create Account", width="stretch", type="primary")
+
+            if btn_register:
+                ok, msg = db.register_user(reg_user, reg_pass, reg_name)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+    st.stop()
+    raise SystemExit
+
+# ----------------- LOGGED IN APPLICATION -----------------
+current_user = st.session_state.get("logged_in_user")
+if not current_user:
+    st.stop()
+    raise SystemExit
+
+user_id = current_user["id"]
+user_display_name = current_user.get("name") or current_user["username"]
+
 # Sidebar: Controls & Period Selection
+st.sidebar.markdown(f"### 👤 Logged in as **{user_display_name}**")
+if st.sidebar.button("🚪 Logout", width="stretch", type="secondary"):
+    st.session_state["logged_in_user"] = None
+    st.toast("Logged out successfully.", icon="👋")
+    st.rerun()
+
+st.sidebar.divider()
 st.sidebar.markdown("### 🗓️ View Period")
 today = datetime.date.today()
 current_year = today.year
@@ -129,7 +216,7 @@ enable_rollover = st.sidebar.checkbox(
     help="When enabled, any underspent budget from the previous month is carried over into this month's budget pool."
 )
 
-total_prev_savings, cat_prev_savings, cat_base_savings, cat_adjustments = db.get_rollover_from_previous_month(year_choice, selected_month)
+total_prev_savings, cat_prev_savings, cat_base_savings, cat_adjustments = db.get_rollover_from_previous_month(user_id, year_choice, selected_month)
 
 if enable_rollover and total_prev_savings > 0:
     st.sidebar.success(f"🎉 **+₹{total_prev_savings:,.2f}** savings rolled over from last month!")
@@ -137,7 +224,7 @@ if enable_rollover and total_prev_savings > 0:
 # Sidebar Category Management & Quick Removal
 st.sidebar.divider()
 st.sidebar.markdown("### ⚙️ Manage Categories")
-categories = db.get_categories()
+categories = db.get_categories(user_id)
 
 with st.sidebar.expander("➕ Create New Category"):
     with st.form("new_category_form", clear_on_submit=True):
@@ -148,7 +235,7 @@ with st.sidebar.expander("➕ Create New Category"):
         submitted = st.form_submit_button("Create Category", width="stretch")
         if submitted:
             if new_cat_name.strip():
-                ok, msg = db.add_category(new_cat_name, new_cat_limit, new_cat_freq, new_cat_icon)
+                ok, msg = db.add_category(user_id, new_cat_name, new_cat_limit, new_cat_freq, new_cat_icon)
                 if ok:
                     st.toast(msg, icon="✅")
                     st.rerun()
@@ -164,15 +251,20 @@ if categories:
         cat_to_del = st.selectbox("Select category to remove", list(del_cat_map.keys()), key="side_del_cat")
         confirm_del_cat = st.checkbox(f"Confirm deleting '{cat_to_del}'", key="conf_side_del")
         if st.button("Delete Category", type="secondary", width="stretch", disabled=not confirm_del_cat):
-            db.delete_category(del_cat_map[cat_to_del])
+            db.delete_category(user_id, del_cat_map[cat_to_del])
             st.toast(f"Removed '{cat_to_del}'!", icon="🗑️")
             st.rerun()
 
 # App Header Banner
 st.markdown(f"""
 <div class="app-header">
-    <h1>💳 SpendWise</h1>
-    <p>Target Budgeting & Dynamic Limit Balancing • Active Period: <strong>{month_choice_name} {year_choice}</strong></p>
+    <div>
+        <h1>💳 SpendWise</h1>
+        <p>Dynamic Budget Balancing • Active Period: <strong>{month_choice_name} {year_choice}</strong></p>
+    </div>
+    <div class="user-tag">
+        👤 {user_display_name}
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -190,7 +282,7 @@ tab_add, tab_overview, tab_charts, tab_rollover, tab_categories, tab_history, ta
 # ----------------- TAB 1: LOG EXPENSE -----------------
 with tab_add:
     # 1-Tap Quick Action Buttons on Mobile
-    templates = db.get_quick_templates()
+    templates = db.get_quick_templates(user_id)
     if templates:
         st.markdown("#### ⚡ 1-Tap Quick Add (Phone Friendly)")
         st.caption("One tap to log instant expenses for today:")
@@ -200,7 +292,7 @@ with tab_add:
             with col_target:
                 btn_label = f"{t['icon']} {t['label']} (₹{t['amount']:.0f})"
                 if st.button(btn_label, key=f"quick_{t['id']}", width="stretch"):
-                    new_id = db.add_expense(t["category_id"], t["amount"], today, f"Quick add: {t['label']}")
+                    db.add_expense(user_id, t["category_id"], t["amount"], today, f"Quick add: {t['label']}")
                     st.toast(f"✅ Logged ₹{t['amount']:.0f} for {t['category_name']}!", icon="⚡")
                     st.rerun()
         st.divider()
@@ -214,7 +306,7 @@ with tab_add:
         selected_cat = cat_map[selected_cat_str]
 
         rolled_over_for_cat = cat_prev_savings.get(selected_cat["id"], 0.0) if enable_rollover else 0.0
-        stats = db.get_category_monthly_stats(selected_cat["id"], year_choice, selected_month, rolled_over_for_cat)
+        stats = db.get_category_monthly_stats(user_id, selected_cat["id"], year_choice, selected_month, rolled_over_for_cat)
 
         col1, col2 = st.columns([1, 1])
         with col1:
@@ -255,7 +347,7 @@ with tab_add:
             """, unsafe_allow_html=True)
 
         if submit_expense:
-            new_id = db.add_expense(selected_cat["id"], amount_input, expense_date, note_input)
+            db.add_expense(user_id, selected_cat["id"], amount_input, expense_date, note_input)
             st.toast(f"Added ₹{amount_input:.2f} for {selected_cat['name']}!", icon="✅")
             st.rerun()
 
@@ -264,7 +356,7 @@ with tab_add:
     st.markdown("#### 🕒 Just Logged Expenses (1-Click Undo / Delete)")
     st.caption("Mistyped an amount? Delete or undo any recent entry right here:")
     
-    recent_entries = db.get_recent_expenses(limit=4)
+    recent_entries = db.get_recent_expenses(user_id, limit=4)
     if not recent_entries:
         st.info("No expenses logged yet.")
     else:
@@ -283,13 +375,13 @@ with tab_add:
             with c_action:
                 st.write("")
                 if st.button("🗑️ Delete", key=f"quick_del_{item['id']}", width="stretch"):
-                    db.delete_expense(item["id"])
+                    db.delete_expense(user_id, item["id"])
                     st.toast(f"Deleted #{item['id']} (₹{item['amount']:.2f})", icon="🗑️")
                     st.rerun()
 
 # ----------------- TAB 2: MONTHLY OVERVIEW -----------------
 with tab_overview:
-    all_expenses = db.get_monthly_expenses(year_choice, selected_month)
+    all_expenses = db.get_monthly_expenses(user_id, year_choice, selected_month)
     total_spent = sum(e["amount"] for e in all_expenses)
     base_budget = sum(c["monthly_budget"] for c in categories)
     rolled_budget = total_prev_savings if enable_rollover else 0.0
@@ -331,7 +423,7 @@ with tab_overview:
     else:
         for cat in categories:
             cat_rollover = cat_prev_savings.get(cat["id"], 0.0) if enable_rollover else 0.0
-            stats = db.get_category_monthly_stats(cat["id"], year_choice, selected_month, cat_rollover)
+            stats = db.get_category_monthly_stats(user_id, cat["id"], year_choice, selected_month, cat_rollover)
             if not stats:
                 continue
 
@@ -374,7 +466,7 @@ with tab_overview:
 # ----------------- TAB 3: VISUAL TRENDS -----------------
 with tab_charts:
     st.subheader(f"📊 Expense Trends & Budget Burn Rate ({month_choice_name} {year_choice})")
-    expenses = db.get_monthly_expenses(year_choice, selected_month)
+    expenses = db.get_monthly_expenses(user_id, year_choice, selected_month)
 
     if not expenses:
         st.info("No expense data available for this month yet to plot charts.")
@@ -428,7 +520,7 @@ with tab_charts:
         cat_comparison = []
         for cat in categories:
             cat_rollover = cat_prev_savings.get(cat["id"], 0.0) if enable_rollover else 0.0
-            st_data = db.get_category_monthly_stats(cat["id"], year_choice, selected_month, cat_rollover)
+            st_data = db.get_category_monthly_stats(user_id, cat["id"], year_choice, selected_month, cat_rollover)
             if st_data:
                 cat_comparison.append({
                     "Category": f"{cat['icon']} {cat['name']}",
@@ -453,21 +545,20 @@ with tab_charts:
 
             st.altair_chart(bar_chart, width="stretch")
 
-# ----------------- TAB 4: EDIT ROLLOVER SAVINGS (NEW PROVISION) -----------------
+# ----------------- TAB 4: EDIT ROLLOVER SAVINGS -----------------
 with tab_rollover:
     st.subheader(f"🐷 Adjust Rollover Savings for {month_choice_name} {year_choice}")
-    st.write("You can increment, decrease, or completely reset the rollover savings for any category.")
+    st.write("You can increment, decrease, or completely reset the rollover savings for any of your categories.")
 
     if not categories:
         st.info("No categories configured yet.")
     else:
-        # Quick Action: Reset All Rollovers to Zero
         col_r_top1, col_r_top2 = st.columns([3, 1])
         with col_r_top1:
             st.caption("Calculated automatically from underspent budget in the preceding month.")
         with col_r_top2:
             if st.button("🔄 Reset ALL Rollovers to ₹0", type="secondary", width="stretch"):
-                db.reset_all_rollovers_for_month(year_choice, selected_month)
+                db.reset_all_rollovers_for_month(user_id, year_choice, selected_month)
                 st.toast("Reset all rollover values to ₹0 for this month!", icon="🔄")
                 st.rerun()
 
@@ -490,40 +581,37 @@ with tab_rollover:
                         st.caption(f"Manual adjustment: {'+' if adj > 0 else ''}₹{adj:,.2f}")
 
                 with r2:
-                    # Quick increment / decrement buttons
                     st.write("**Quick Adjust:**")
                     qb1, qb2, qb3, qb4 = st.columns(4)
                     with qb1:
                         if st.button("+₹50", key=f"p50_{cid}", width="stretch"):
-                            db.set_rollover_adjustment(cid, year_choice, selected_month, adj + 50)
+                            db.set_rollover_adjustment(user_id, cid, year_choice, selected_month, adj + 50)
                             st.rerun()
                     with qb2:
                         if st.button("+₹100", key=f"p100_{cid}", width="stretch"):
-                            db.set_rollover_adjustment(cid, year_choice, selected_month, adj + 100)
+                            db.set_rollover_adjustment(user_id, cid, year_choice, selected_month, adj + 100)
                             st.rerun()
                     with qb3:
                         if st.button("-₹50", key=f"m50_{cid}", width="stretch"):
-                            db.set_rollover_adjustment(cid, year_choice, selected_month, adj - 50)
+                            db.set_rollover_adjustment(user_id, cid, year_choice, selected_month, adj - 50)
                             st.rerun()
                     with qb4:
                         if st.button("-₹100", key=f"m100_{cid}", width="stretch"):
-                            db.set_rollover_adjustment(cid, year_choice, selected_month, adj - 100)
+                            db.set_rollover_adjustment(user_id, cid, year_choice, selected_month, adj - 100)
                             st.rerun()
 
                 with r3:
-                    # Set custom exact amount or reset
                     new_val = st.number_input(f"Set Exact Rollover (₹)", min_value=0.0, value=float(cur_final), step=50.0, key=f"custom_ro_{cid}")
                     c_btn1, c_btn2 = st.columns(2)
                     with c_btn1:
                         if st.button("Apply", key=f"apply_ro_{cid}", width="stretch"):
-                            # adjustment = target_value - base_s
                             new_adj = new_val - base_s
-                            db.set_rollover_adjustment(cid, year_choice, selected_month, new_adj)
+                            db.set_rollover_adjustment(user_id, cid, year_choice, selected_month, new_adj)
                             st.toast(f"Updated {cat['name']} rollover to ₹{new_val:,.2f}!", icon="✅")
                             st.rerun()
                     with c_btn2:
                         if st.button("Reset to 0", key=f"zero_ro_{cid}", width="stretch"):
-                            db.reset_category_rollover(cid, year_choice, selected_month, base_s)
+                            db.reset_category_rollover(user_id, cid, year_choice, selected_month, base_s)
                             st.toast(f"Reset {cat['name']} rollover to ₹0!", icon="🔄")
                             st.rerun()
 
@@ -540,7 +628,7 @@ with tab_categories:
         for cat in categories:
             with st.expander(f"{cat['icon']} {cat['name']} — Settings & Removal", expanded=False):
                 cat_rollover = cat_prev_savings.get(cat["id"], 0.0) if enable_rollover else 0.0
-                stats = db.get_category_monthly_stats(cat["id"], year_choice, selected_month, cat_rollover)
+                stats = db.get_category_monthly_stats(user_id, cat["id"], year_choice, selected_month, cat_rollover)
                 colA, colB = st.columns(2)
                 with colA:
                     with st.form(f"edit_cat_{cat['id']}"):
@@ -550,7 +638,7 @@ with tab_categories:
                         e_freq = st.number_input("Frequency per Month", min_value=1, value=int(cat["frequency_per_month"]), step=1)
                         save_edit = st.form_submit_button("Update Category Rule", width="stretch")
                         if save_edit:
-                            ok, msg = db.update_category(cat["id"], e_name, e_limit, e_freq, e_icon)
+                            ok, msg = db.update_category(user_id, cat["id"], e_name, e_limit, e_freq, e_icon)
                             if ok:
                                 st.toast(msg, icon="✅")
                                 st.rerun()
@@ -570,8 +658,8 @@ with tab_categories:
                     st.markdown("**Danger Zone:**")
                     confirm_del = st.checkbox(f"Confirm removing '{cat['name']}'", key=f"conf_tab_del_{cat['id']}")
                     if st.button(f"🗑️ Delete Category: {cat['name']}", key=f"del_{cat['id']}", disabled=not confirm_del, width="stretch"):
-                        db.delete_category(cat["id"])
-                        st.toast(f"Category '{cat['name']}' and its records deleted.", icon="🗑️")
+                        db.delete_category(user_id, cat["id"])
+                        st.toast(f"Category '{cat['name']}' deleted.", icon="🗑️")
                         st.rerun()
 
     st.divider()
@@ -592,7 +680,7 @@ with tab_categories:
                 t_save = st.form_submit_button("Add Quick Button", width="stretch")
                 if t_save:
                     if t_label.strip():
-                        db.add_quick_template(t_cat_opts[t_cat_choice], t_label, t_amount, t_icon)
+                        db.add_quick_template(user_id, t_cat_opts[t_cat_choice], t_label, t_amount, t_icon)
                         st.toast(f"Added shortcut '{t_label}'!", icon="⚡")
                         st.rerun()
                     else:
@@ -600,7 +688,7 @@ with tab_categories:
 
     with col_t2:
         st.write("**Existing Quick Buttons**")
-        templates_list = db.get_quick_templates()
+        templates_list = db.get_quick_templates(user_id)
         if not templates_list:
             st.info("No shortcuts created yet.")
         else:
@@ -610,13 +698,13 @@ with tab_categories:
                     st.write(f"{tmpl['icon']} **{tmpl['label']}** — ₹{tmpl['amount']:.0f} *({tmpl['category_name']})*")
                 with row_c2:
                     if st.button("Delete", key=f"del_tmpl_{tmpl['id']}"):
-                        db.delete_quick_template(tmpl["id"])
+                        db.delete_quick_template(user_id, tmpl["id"])
                         st.rerun()
 
 # ----------------- TAB 6: HISTORY & DELETE -----------------
 with tab_history:
     st.subheader(f"📜 Transaction Log for {month_choice_name} {year_choice}")
-    expenses = db.get_monthly_expenses(year_choice, selected_month)
+    expenses = db.get_monthly_expenses(user_id, year_choice, selected_month)
     
     if not expenses:
         st.info("No expenses logged for this month yet.")
@@ -655,14 +743,14 @@ with tab_history:
         selected_del_id = del_options[selected_del_label]
         
         if st.button("Delete Selected Transaction", type="secondary"):
-            db.delete_expense(selected_del_id)
+            db.delete_expense(user_id, selected_del_id)
             st.toast(f"Deleted transaction #{selected_del_id}!", icon="🗑️")
             st.rerun()
 
 # ----------------- TAB 7: RESET PROVISIONS -----------------
 with tab_reset:
     st.subheader("🔄 Expense Reset Provisions")
-    st.caption("Safely reset or clear logged expenses. Your categories and budget rules will remain intact.")
+    st.caption("Safely reset or clear logged expenses for your account. Categories and rules remain intact.")
 
     r_col1, r_col2, r_col3 = st.columns(3)
 
@@ -671,12 +759,12 @@ with tab_reset:
         st.markdown("""
         <div class="stat-card">
             <h4>📅 Weekly Reset</h4>
-            <p style="color:#64748b; font-size:0.88rem;">Clear all expenses logged for the current active week (Monday to Sunday).</p>
+            <p style="color:#64748b; font-size:0.88rem;">Clear your expenses logged for the current active week.</p>
         </div>
         """, unsafe_allow_html=True)
         confirm_week = st.checkbox("Confirm weekly reset", key="conf_week")
         if st.button("Reset Current Week", type="secondary", width="stretch", disabled=not confirm_week):
-            cnt, s_date, e_date = db.reset_expenses_weekly()
+            cnt, s_date, e_date = db.reset_expenses_weekly(user_id)
             st.toast(f"Deleted {cnt} expenses from {s_date} to {e_date}!", icon="🔄")
             st.rerun()
 
@@ -685,12 +773,12 @@ with tab_reset:
         st.markdown(f"""
         <div class="stat-card">
             <h4>🗓️ Monthly Reset</h4>
-            <p style="color:#64748b; font-size:0.88rem;">Clear all expenses for <strong>{month_choice_name} {year_choice}</strong>.</p>
+            <p style="color:#64748b; font-size:0.88rem;">Clear your expenses for <strong>{month_choice_name} {year_choice}</strong>.</p>
         </div>
         """, unsafe_allow_html=True)
         confirm_month = st.checkbox("Confirm monthly reset", key="conf_month")
         if st.button(f"Reset {month_choice_name} {year_choice}", type="secondary", width="stretch", disabled=not confirm_month):
-            cnt = db.reset_expenses_monthly(year_choice, selected_month)
+            cnt = db.reset_expenses_monthly(user_id, year_choice, selected_month)
             st.toast(f"Deleted {cnt} expenses for {month_choice_name} {year_choice}!", icon="🔄")
             st.rerun()
 
@@ -699,11 +787,11 @@ with tab_reset:
         st.markdown("""
         <div class="stat-card">
             <h4 style="color:#dc2626;">⚠️ All-Time Reset</h4>
-            <p style="color:#64748b; font-size:0.88rem;">Clear all recorded expenses across all months and years.</p>
+            <p style="color:#64748b; font-size:0.88rem;">Clear all expenses across all history for your account.</p>
         </div>
         """, unsafe_allow_html=True)
         confirm_all = st.checkbox("Confirm ALL-TIME wipe", key="conf_all")
         if st.button("Wipe All Expenses", type="primary", width="stretch", disabled=not confirm_all):
-            cnt = db.reset_expenses_all_time()
+            cnt = db.reset_expenses_all_time(user_id)
             st.toast(f"All {cnt} expenses cleared!", icon="🧹")
             st.rerun()
