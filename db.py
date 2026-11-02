@@ -24,9 +24,19 @@ def init_db():
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             name TEXT,
+            is_admin INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Ensure is_admin column exists in users table
+    cur.execute("PRAGMA table_info(users)")
+    user_cols = [c["name"] for c in cur.fetchall()]
+    if "is_admin" not in user_cols:
+        cur.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
+
+    # Set initial admin accounts: 'admin' and 'asif' (or demo if single user)
+    cur.execute("UPDATE users SET is_admin = 1 WHERE username IN ('admin', 'asif')")
 
     # 2. Re-create categories if it still has old global UNIQUE(name) instead of UNIQUE(user_id, name)
     cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='categories'")
@@ -554,5 +564,81 @@ def delete_quick_template(user_id, template_id):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM quick_templates WHERE id = ? AND user_id = ?", (template_id, user_id))
+    conn.commit()
+    conn.close()
+
+# ----------------- ADMIN MONITORING & METRICS -----------------
+def get_all_users_admin():
+    """Returns overview list of all registered users with summary stats."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT 
+            u.id, 
+            u.username, 
+            u.name, 
+            u.is_admin, 
+            u.created_at,
+            COUNT(DISTINCT c.id) as category_count,
+            COUNT(DISTINCT e.id) as expense_count,
+            COALESCE(SUM(e.amount), 0) as total_spent_all_time,
+            MAX(e.date) as last_expense_date
+        FROM users u
+        LEFT JOIN categories c ON u.id = c.user_id
+        LEFT JOIN expenses e ON u.id = e.user_id
+        GROUP BY u.id
+        ORDER BY u.id ASC
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_platform_system_stats():
+    """Returns platform-wide totals across all users."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) as total_users FROM users")
+    total_users = cur.fetchone()["total_users"]
+
+    cur.execute("SELECT COUNT(*) as total_categories FROM categories")
+    total_categories = cur.fetchone()["total_categories"]
+
+    cur.execute("SELECT COUNT(*) as total_expenses, COALESCE(SUM(amount), 0) as total_volume FROM expenses")
+    exp_row = cur.fetchone()
+
+    cur.execute("""
+        SELECT e.id, e.amount, e.date, e.note, u.username, u.name as user_name, c.name as category_name, c.icon
+        FROM expenses e
+        JOIN users u ON e.user_id = u.id
+        JOIN categories c ON e.category_id = c.id
+        ORDER BY e.id DESC
+        LIMIT 10
+    """)
+    recent_transactions = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    return {
+        "total_users": total_users,
+        "total_categories": total_categories,
+        "total_expenses": exp_row["total_expenses"],
+        "total_volume": exp_row["total_volume"],
+        "recent_transactions": recent_transactions
+    }
+
+def toggle_user_admin_status(user_id, make_admin: bool):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET is_admin = ? WHERE id = ?", (1 if make_admin else 0, user_id))
+    conn.commit()
+    conn.close()
+
+def delete_user_account_admin(user_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    cur.execute("DELETE FROM categories WHERE user_id = ?", (user_id,))
+    cur.execute("DELETE FROM expenses WHERE user_id = ?", (user_id,))
+    cur.execute("DELETE FROM quick_templates WHERE user_id = ?", (user_id,))
+    cur.execute("DELETE FROM rollover_adjustments WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()

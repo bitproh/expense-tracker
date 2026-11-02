@@ -147,7 +147,7 @@ if st.session_state["logged_in_user"] is None:
     with auth_tab_login:
         st.write("Welcome back! Sign in to access your personal expenses.")
         with st.form("login_form"):
-            login_user = st.text_input("Username", placeholder="e.g. demo, azif")
+            login_user = st.text_input("Username", placeholder="e.g. asif")
             login_pass = st.text_input("Password", type="password")
             btn_login = st.form_submit_button("Sign In", width="stretch", type="primary")
 
@@ -188,6 +188,7 @@ if not current_user:
 
 user_id = current_user["id"]
 user_display_name = current_user.get("name") or current_user["username"]
+is_admin = bool(current_user.get("is_admin", 0))
 
 # Sidebar: Controls & Period Selection
 st.sidebar.markdown(f"### 👤 Logged in as **{user_display_name}**")
@@ -256,6 +257,7 @@ if categories:
             st.rerun()
 
 # App Header Banner
+admin_badge = '<span style="background:#f59e0b; color:#1e293b; padding:2px 8px; border-radius:10px; font-weight:700; font-size:0.75rem; margin-left:6px;">ADMIN</span>' if is_admin else ''
 st.markdown(f"""
 <div class="app-header">
     <div>
@@ -263,13 +265,13 @@ st.markdown(f"""
         <p>Dynamic Budget Balancing • Active Period: <strong>{month_choice_name} {year_choice}</strong></p>
     </div>
     <div class="user-tag">
-        👤 {user_display_name}
+        👤 {user_display_name} {admin_badge}
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-# Navigation Tabs
-tab_add, tab_overview, tab_charts, tab_rollover, tab_categories, tab_history, tab_reset = st.tabs([
+# Navigation Tabs (with Admin tab if user is admin)
+tab_titles = [
     "➕ Log Expense", 
     "📊 Monthly Overview", 
     "📈 Visual Trends", 
@@ -277,7 +279,19 @@ tab_add, tab_overview, tab_charts, tab_rollover, tab_categories, tab_history, ta
     "🎯 Categories & Shortcuts", 
     "📜 History & Delete",
     "🔄 Reset Provisions"
-])
+]
+if is_admin:
+    tab_titles.append("🛡️ Admin Panel")
+
+tabs = st.tabs(tab_titles)
+tab_add = tabs[0]
+tab_overview = tabs[1]
+tab_charts = tabs[2]
+tab_rollover = tabs[3]
+tab_categories = tabs[4]
+tab_history = tabs[5]
+tab_reset = tabs[6]
+tab_admin = tabs[7] if is_admin else None
 
 # ----------------- TAB 1: LOG EXPENSE -----------------
 with tab_add:
@@ -795,3 +809,100 @@ with tab_reset:
             cnt = db.reset_expenses_all_time(user_id)
             st.toast(f"All {cnt} expenses cleared!", icon="🧹")
             st.rerun()
+
+# ----------------- TAB 8: ADMIN MONITORING PANEL -----------------
+if is_admin and tab_admin is not None:
+    with tab_admin:
+        st.subheader("🛡️ Platform Admin & User Monitoring")
+        st.caption("Real-time oversight of all registered users, system-wide expense activity, and account controls.")
+
+        sys_stats = db.get_platform_system_stats()
+
+        # System Overview Cards
+        a1, a2, a3, a4 = st.columns(4)
+        with a1:
+            st.metric("Total Users", sys_stats["total_users"])
+        with a2:
+            st.metric("Total Categories Across Users", sys_stats["total_categories"])
+        with a3:
+            st.metric("Total Platform Expenses", sys_stats["total_expenses"])
+        with a4:
+            st.metric("Total Spending Logged", f"₹{sys_stats['total_volume']:,.2f}")
+
+        st.divider()
+
+        # All Users Table
+        st.markdown("#### 👥 Registered Users Directory")
+        all_users = db.get_all_users_admin()
+
+        if not all_users:
+            st.info("No users found.")
+        else:
+            users_df = pd.DataFrame([{
+                "User ID": u["id"],
+                "Username": u["username"],
+                "Full Name": u["name"] or "-",
+                "Role": "👑 Admin" if u["is_admin"] else "User",
+                "Categories": u["category_count"],
+                "Expenses Logged": u["expense_count"],
+                "Total Spent (₹)": f"₹{u['total_spent_all_time']:,.2f}",
+                "Last Active": u["last_expense_date"] or "Never",
+                "Joined On": str(u["created_at"])[:10]
+            } for u in all_users])
+
+            st.dataframe(users_df, width="stretch")
+
+            st.write("---")
+
+            # User Details & Management Section
+            st.markdown("#### ⚙️ User Account Actions")
+            m_col1, m_col2 = st.columns(2)
+
+            with m_col1:
+                st.write("**Inspect User Categories & Expenses**")
+                inspect_user_map = {f"#{u['id']} • {u['username']} ({u['name']})": u for u in all_users}
+                chosen_user_label = st.selectbox("Select user to inspect", list(inspect_user_map.keys()), key="admin_inspect_user")
+                chosen_user = inspect_user_map[chosen_user_label]
+
+                user_cats = db.get_categories(chosen_user["id"])
+                cat_summary = ", ".join([f"{c['icon']} {c['name']} (₹{c['monthly_budget']:,.0f})" for c in user_cats]) or "None"
+                st.info(f"**Categories configured:** {cat_summary}")
+
+                # Admin toggle role
+                if chosen_user["id"] != user_id:
+                    new_role = not chosen_user["is_admin"]
+                    role_btn_text = "Remove Admin Rights" if chosen_user["is_admin"] else "Grant Admin Rights"
+                    if st.button(role_btn_text, key=f"role_btn_{chosen_user['id']}"):
+                        db.toggle_user_admin_status(chosen_user["id"], new_role)
+                        st.toast(f"Updated role for {chosen_user['username']}!", icon="👑")
+                        st.rerun()
+
+            with m_col2:
+                st.write("**Danger Zone (Delete User Account)**")
+                if chosen_user["id"] == user_id:
+                    st.warning("⚠️ You cannot delete your own active admin account.")
+                else:
+                    st.write(f"Permanently remove user **{chosen_user['username']}** and wipe all their categories and expenses.")
+                    conf_del_u = st.checkbox(f"Confirm deleting '{chosen_user['username']}'", key=f"conf_del_u_{chosen_user['id']}")
+                    if st.button("Delete User Account", type="primary", key=f"del_u_btn_{chosen_user['id']}", disabled=not conf_del_u):
+                        db.delete_user_account_admin(chosen_user["id"])
+                        st.toast(f"Deleted user #{chosen_user['id']} ({chosen_user['username']})", icon="🗑️")
+                        st.rerun()
+
+        st.divider()
+
+        # Platform Recent Activity Log
+        st.markdown("#### ⚡ Platform Live Activity Stream (Recent 10 Transactions)")
+        recent_txs = sys_stats["recent_transactions"]
+        if not recent_txs:
+            st.info("No transaction activity recorded yet.")
+        else:
+            tx_df = pd.DataFrame([{
+                "ID": tx["id"],
+                "User": f"@{tx['username']}",
+                "Category": f"{tx['icon']} {tx['category_name']}",
+                "Amount (₹)": f"₹{tx['amount']:,.2f}",
+                "Date": tx["date"],
+                "Note": tx["note"] or "-"
+            } for tx in recent_txs])
+            st.dataframe(tx_df, width="stretch")
