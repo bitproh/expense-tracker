@@ -101,7 +101,32 @@ def init_db():
         )
     """)
 
-    # 5. Rollover Adjustments Table with user_id
+    # 5. Rollover Adjustments Table with user_id & migration
+    cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='rollover_adjustments'")
+    ro_schema = cur.fetchone()
+    if ro_schema and "UNIQUE(category_id, year, month)" in ro_schema[0]:
+        # Migrate old table to UNIQUE(user_id, category_id, year, month)
+        cur.execute("""
+            CREATE TABLE rollover_adjustments_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER DEFAULT 1,
+                category_id INTEGER NOT NULL,
+                year INTEGER NOT NULL,
+                month INTEGER NOT NULL,
+                adjustment REAL DEFAULT 0.0,
+                UNIQUE(user_id, category_id, year, month),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+            )
+        """)
+        cur.execute("""
+            INSERT INTO rollover_adjustments_new (id, user_id, category_id, year, month, adjustment)
+            SELECT id, COALESCE(user_id, 1), category_id, year, month, adjustment
+            FROM rollover_adjustments
+        """)
+        cur.execute("DROP TABLE rollover_adjustments")
+        cur.execute("ALTER TABLE rollover_adjustments_new RENAME TO rollover_adjustments")
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS rollover_adjustments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -434,12 +459,25 @@ def get_rollover_from_previous_month(user_id, year, month):
 def set_rollover_adjustment(user_id, category_id, year, month, adjustment_value):
     conn = get_connection()
     cur = conn.cursor()
+    # Check if record already exists
     cur.execute("""
-        INSERT INTO rollover_adjustments (user_id, category_id, year, month, adjustment)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(user_id, category_id, year, month)
-        DO UPDATE SET adjustment = excluded.adjustment
-    """, (user_id, category_id, year, month, float(adjustment_value)))
+        SELECT id FROM rollover_adjustments
+        WHERE user_id = ? AND category_id = ? AND year = ? AND month = ?
+    """, (user_id, category_id, year, month))
+    existing = cur.fetchone()
+
+    if existing:
+        cur.execute("""
+            UPDATE rollover_adjustments
+            SET adjustment = ?
+            WHERE id = ?
+        """, (float(adjustment_value), existing["id"]))
+    else:
+        cur.execute("""
+            INSERT INTO rollover_adjustments (user_id, category_id, year, month, adjustment)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, category_id, year, month, float(adjustment_value)))
+
     conn.commit()
     conn.close()
 
